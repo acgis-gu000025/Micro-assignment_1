@@ -1,5 +1,6 @@
 # Otsu's Thresholding for Grayscale Satellite Images
 # This script implements Otsu's automatic thresholding method for image segmentation
+# project link: https://brightspace.algonquincollege.com/d2l/le/content/809166/viewContent/12332940/View
 
 # Load required libraries
 library(jpeg)
