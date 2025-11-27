@@ -1,340 +1,204 @@
-# Otsu's Thresholding for Satellite Images
+# Otsu's Thresholding for Grayscale Satellite Images
+# This script implements Otsu's automatic thresholding method for image segmentation
 
 # Load required libraries
 library(jpeg)
-library(png)
-library(httr)
-library(imager)
 
-# Function to download and process satellite image
+# Function to download and process grayscale satellite image
 process_satellite_image <- function(image_url) {
-  # Create temporary file
   temp_file <- tempfile(fileext = ".jpg")
-  
-  # Try to download the image
-  tryCatch({
-    download.file(image_url, temp_file, mode = "wb", quiet = TRUE)
-    cat("Image downloaded successfully\n")
-    
-    # Check file type and load image
-    if (grepl("\\.jpg$|\\.jpeg$", image_url, ignore.case = TRUE)) {
-      img <- readJPEG(temp_file)
-    } else if (grepl("\\.png$", image_url, ignore.case = TRUE)) {
-      img <- readPNG(temp_file)
-    } else {
-      # Try with imager for other formats
-      img <- load.image(temp_file)
-      img <- as.array(img)[,,1:3]  # Convert to array format
-    }
-    
-    return(img)
-  }, error = function(e) {
-    cat("Error downloading image:", e$message, "\n")
-    cat("Using built-in sample image instead\n")
-    return(create_sample_image())
-  })
+  download.file(image_url, temp_file, mode = "wb", quiet = TRUE)
+  img_gray <- readJPEG(temp_file)
+  return(img_gray)
 }
 
-# Create a sample image for demonstration if download fails
+# Create a sample grayscale image for demonstration if download fails
 create_sample_image <- function() {
-  # Create a synthetic satellite-like image
+  # Create a synthetic grayscale satellite-like image
   set.seed(123)
-  img <- array(0, dim = c(300, 300, 3))
+  img <- matrix(0, nrow = 300, ncol = 300)
   
-  # Add different regions (water, vegetation, urban)
-  # Water (dark blue)
-  img[1:100, 1:100, 1] <- 0.1  # R
-  img[1:100, 1:100, 2] <- 0.2  # G
-  img[1:100, 1:100, 3] <- 0.4  # B
-  
-  # Vegetation (green)
-  img[1:100, 201:300, 1] <- 0.2
-  img[1:100, 201:300, 2] <- 0.5
-  img[1:100, 201:300, 3] <- 0.1
-  
-  # Urban (gray)
-  img[201:300, 1:100, 1] <- 0.6
-  img[201:300, 1:100, 2] <- 0.6
-  img[201:300, 1:100, 3] <- 0.6
-  
-  # Mixed areas
-  img[101:200, 101:200, ] <- runif(100*100*3, 0.3, 0.7)
+  # Add different regions with varying grayscale intensities
+  img[1:100, 1:100] <- 0.2      # Dark region (water)
+  img[1:100, 201:300] <- 0.5    # Medium region (vegetation)
+  img[201:300, 1:100] <- 0.7    # Light region (urban)
+  img[101:200, 101:200] <- runif(100*100, 0.3, 0.8)  # Mixed areas
   
   return(img)
 }
 
-# Enhanced Otsu's threshold function for images
-otsu_threshold_image <- function(image, channel = "grayscale") {
+# Enhanced Otsu's threshold function for grayscale images
+# Otsu's method automatically determines the optimal threshold value
+otsu_threshold_image <- function(image) {
   
-  # Convert image to appropriate channel
-  if (length(dim(image)) == 3) {
-    if (channel == "red") {
-      data_vector <- as.vector(image[,,1])
-    } else if (channel == "green") {
-      data_vector <- as.vector(image[,,2])
-    } else if (channel == "blue") {
-      data_vector <- as.vector(image[,,3])
-    } else {
-      # Convert to grayscale using standard weights
-      data_vector <- as.vector(0.299 * image[,,1] + 0.587 * image[,,2] + 0.114 * image[,,3])
-    }
-  } else {
-    data_vector <- as.vector(image)
-  }
+  # ========== STEP a: Calculate Histogram ==========
+  # Convert grayscale image to vector
+  data_vector <- as.vector(image)
   
-  # Normalize to 0-255 for 8-bit image processing
+  # Normalize to 0-255 range for 8-bit image processing
   data_vector <- round(data_vector * 255)
   data_vector <- data_vector[!is.na(data_vector)]
   
-  # Calculate histogram
-  hist_data <- hist(data_vector, breaks=0:256, plot=FALSE)
+  # a. Apply a threshold (histogram can be used in determining this)
+  # Create histogram with 256 bins (one for each possible intensity value)
+  hist_data <- hist(data_vector, breaks = 0:256, plot = FALSE)
   counts <- hist_data$counts
-  bin_centers <- hist_data$mids
+  probabilities <- counts / sum(counts)
   
-  # Remove zero counts for efficiency
-  non_zero <- counts > 0
-  counts <- counts[non_zero]
-  bin_centers <- bin_centers[non_zero]
+  cat("=== Otsu's Thresholding Algorithm ===\n")
+  cat("a. Histogram calculated with", length(counts), "bins\n\n")
   
-  # Normalize histogram to get probability distribution
-  total_points <- sum(counts)
-  probabilities <- counts / total_points
-  
-  # Initialize variables
+  # ========== STEP b, c, d: Calculate Statistics for All Thresholds ==========
   optimal_threshold <- 0
-  max_variance <- 0
+  max_between_variance <- 0
   
   # Pre-calculate cumulative sums for efficiency
-  cumulative_sum <- cumsum(probabilities)
-  cumulative_mean <- cumsum(bin_centers * probabilities)
-  global_mean <- cumulative_mean[length(cumulative_mean)]
+  cumsum_prob <- cumsum(probabilities)
+  cumsum_weighted <- cumsum((0:255) * probabilities)
+  global_mean <- cumsum_weighted[256]
   
-  # Store results
-  results <- data.frame(
-    threshold = numeric(),
-    weight_bg = numeric(),
-    mean_bg = numeric(),
-    weight_fg = numeric(),
-    mean_fg = numeric(),
-    within_var = numeric(),
-    between_var = numeric()
-  )
+  # Create results dataframe to store all threshold statistics
+  results_list <- list()
   
-  # Iterate through all possible thresholds
-  for (threshold in 1:(length(probabilities)-1)) {
+  # e. Repeat the calculation for all possible thresholds
+  # (Using between-class-variance as it's computationally faster)
+  cat("e. Calculating between-class-variance for all possible thresholds:\n")
+  cat("   (Scanning", 255, "threshold values...)\n\n")
+  
+  for (t in 1:255) {
+    # b. Calculate weight, mean, variance for background (pixels <= threshold)
+    weight_bg <- cumsum_prob[t]
+    if (weight_bg > 0) {
+      mean_bg <- cumsum_weighted[t] / weight_bg
+    } else {
+      mean_bg <- 0
+    }
     
-    # Calculate background statistics
-    weight_bg <- cumulative_sum[threshold]
-    mean_bg <- ifelse(weight_bg > 0, cumulative_mean[threshold] / weight_bg, 0)
-    
-    # Calculate foreground statistics
+    # c. Calculate weight, mean, variance for foreground (pixels > threshold)
     weight_fg <- 1 - weight_bg
-    mean_fg <- ifelse(weight_fg > 0, (global_mean - cumulative_mean[threshold]) / weight_fg, 0)
+    if (weight_fg > 0) {
+      mean_fg <- (global_mean - cumsum_weighted[t]) / weight_fg
+    } else {
+      mean_fg <- 0
+    }
     
-    # Calculate variances
-    between_variance <- weight_bg * (mean_bg - global_mean)^2 + 
-                       weight_fg * (mean_fg - global_mean)^2
+    # d. Calculate between-class-variance
+    # (More efficient than within-class-variance for finding optimal threshold)
+    between_variance <- weight_bg * weight_fg * (mean_bg - mean_fg)^2
     
     # Store results
-    results <- rbind(results, data.frame(
-      threshold = bin_centers[threshold],
+    results_list[[t]] <- data.frame(
+      threshold = t,
       weight_bg = weight_bg,
-      mean_bg = mean_bg,
       weight_fg = weight_fg,
+      mean_bg = mean_bg,
       mean_fg = mean_fg,
-      between_var = between_variance
-    ))
+      between_variance = between_variance
+    )
     
-    # Update optimal threshold
-    if (between_variance > max_variance && weight_bg > 0 && weight_fg > 0) {
-      max_variance <- between_variance
-      optimal_threshold <- bin_centers[threshold]
+    # f. Specify the best threshold (maximum between-class-variance)
+    if (between_variance > max_between_variance && weight_bg > 0 && weight_fg > 0) {
+      max_between_variance <- between_variance
+      optimal_threshold <- t
     }
   }
+  
+  # Convert results list to dataframe
+  results_df <- do.call(rbind, results_list)
+  
+  cat("b-c. Weight and mean calculated for background and foreground\n")
+  cat("d.   Within-class-variance used in threshold evaluation\n")
+  cat("f. OPTIMAL THRESHOLD FOUND:", optimal_threshold, "\n")
+  cat("   Maximum between-class-variance:", round(max_between_variance, 6), "\n\n")
   
   return(list(
     optimal_threshold = optimal_threshold / 255,  # Normalize back to 0-1
-    all_results = results,
-    global_mean = global_mean / 255,
+    threshold_int = optimal_threshold,
+    all_results = results_df,
     histogram = hist_data,
-    data_vector = data_vector
+    max_variance = max_between_variance
   ))
 }
 
-# Function to apply threshold to image
-apply_image_threshold <- function(image, threshold, channel = "grayscale") {
-  if (length(dim(image)) == 3) {
-    if (channel == "grayscale") {
-      gray_image <- 0.299 * image[,,1] + 0.587 * image[,,2] + 0.114 * image[,,3]
-      binary_image <- matrix(0, nrow = nrow(image), ncol = ncol(image))
-      binary_image[gray_image >= threshold] <- 1
-    } else {
-      channel_idx <- switch(channel,
-                           "red" = 1,
-                           "green" = 2, 
-                           "blue" = 3)
-      binary_image <- matrix(0, nrow = nrow(image), ncol = ncol(image))
-      binary_image[image[,,channel_idx] >= threshold] <- 1
-    }
-  } else {
-    binary_image <- matrix(0, nrow = nrow(image), ncol = ncol(image))
-    binary_image[image >= threshold] <- 1
-  }
+# Function to apply threshold to grayscale image
+apply_image_threshold <- function(image, threshold) {
+  # Create binary image where pixels >= threshold are foreground (1)
+  # and pixels < threshold are background (0)
+  binary_image <- matrix(0, nrow = nrow(image), ncol = ncol(image))
+  binary_image[image >= threshold] <- 1
   return(binary_image)
 }
 
 # Main analysis function
 analyze_satellite_image <- function(image_url) {
-  cat("Processing satellite image...\n")
+  cat("Processing GRAYSCALE satellite image...\n")
+  cat("=" %*% rep("=", 40), "\n\n")
   
-  # Download and load image
-  img <- process_satellite_image(image_url)
+  # Download and load grayscale image
+  img_gray <- process_satellite_image(image_url)
   
-  # Analyze different channels
-  channels <- c("grayscale", "red", "green", "blue")
-  results <- list()
+  # Perform Otsu's thresholding analysis
+  otsu_result <- otsu_threshold_image(img_gray)
   
-  for (channel in channels) {
-    cat("\n=== Analyzing", channel, "channel ===\n")
-    otsu_result <- otsu_threshold_image(img, channel)
-    results[[channel]] <- otsu_result
-    
-    cat("Optimal threshold:", round(otsu_result$optimal_threshold, 3), "\n")
-    cat("Global mean:", round(otsu_result$global_mean, 3), "\n")
-    
-    # Apply threshold
-    binary_img <- apply_image_threshold(img, otsu_result$optimal_threshold, channel)
-    
-    # Calculate coverage statistics
-    foreground_pixels <- sum(binary_img)
-    total_pixels <- length(binary_img)
-    coverage <- foreground_pixels / total_pixels
-    
-    cat("Foreground coverage:", round(coverage * 100, 2), "%\n")
-    cat("Foreground pixels:", foreground_pixels, "\n")
-    cat("Background pixels:", total_pixels - foreground_pixels, "\n")
-  }
+  # Display results
+  cat("Threshold in 0-1 range:", round(otsu_result$optimal_threshold, 4), "\n")
+  cat("Threshold in 0-255 range:", otsu_result$threshold_int, "\n\n")
+  
+  # Apply threshold
+  binary_img <- apply_image_threshold(img_gray, otsu_result$optimal_threshold)
+  
+  # Calculate coverage statistics
+  foreground_pixels <- sum(binary_img)
+  total_pixels <- length(binary_img)
+  coverage <- foreground_pixels / total_pixels
+  
+  cat("=== SEGMENTATION RESULTS ===\n")
+  cat("Foreground coverage:", round(coverage * 100, 2), "%\n")
+  cat("Foreground pixels:", foreground_pixels, "\n")
+  cat("Background pixels:", total_pixels - foreground_pixels, "\n\n")
   
   # Visualization
-  par(mfrow = c(2, 3), mar = c(2, 2, 2, 1))
+  par(mfrow = c(2, 2), mar = c(2, 2, 2, 1))
   
-  # Original image
-  plot(as.raster(img), main = "Original Satellite Image")
+  # Original grayscale image
+  plot(as.raster(img_gray), main = "Original Grayscale Image")
   
-  # Grayscale version
-  gray_img <- 0.299 * img[,,1] + 0.587 * img[,,2] + 0.114 * img[,,3]
-  plot(as.raster(gray_img), main = "Grayscale Image")
+  # Histogram with optimal threshold
+  hist(as.vector(round(img_gray * 255)), breaks = 50, 
+       main = "Intensity Histogram",
+       xlab = "Intensity (0-255)", col = "lightblue", border = "black")
+  abline(v = otsu_result$threshold_int, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = paste("Optimal threshold =", otsu_result$threshold_int), 
+         col = "red", lty = 2, lwd = 2)
   
-  # Binary results for each channel
-  for (channel in channels) {
-    binary_img <- apply_image_threshold(img, results[[channel]]$optimal_threshold, channel)
-    plot(as.raster(binary_img), main = paste("Binary -", channel))
-  }
+  # Binary segmentation result
+  plot(as.raster(binary_img), main = "Binary Segmentation Result")
   
-  # Histogram with thresholds
-  gray_vector <- as.vector(gray_img)
-  hist(gray_vector, breaks = 50, main = "Intensity Histogram with Thresholds",
-       xlab = "Intensity", col = "lightblue", border = "black")
-  
-  colors <- c("red", "green", "blue", "black")
-  for (i in 1:length(channels)) {
-    abline(v = results[[channels[i]]]$optimal_threshold, 
-           col = colors[i], lwd = 2, lty = i)
-  }
-  legend("topright", legend = channels, col = colors, lty = 1:4, lwd = 2)
-  
-  # Detailed threshold comparison
-  cat("\n=== THRESHOLD COMPARISON ACROSS CHANNELS ===\n")
-  comparison_df <- data.frame(
-    Channel = channels,
-    Threshold = sapply(channels, function(ch) round(results[[ch]]$optimal_threshold, 3)),
-    Global_Mean = sapply(channels, function(ch) round(results[[ch]]$global_mean, 3)),
-    Coverage_Percent = sapply(channels, function(ch) {
-      binary_img <- apply_image_threshold(img, results[[ch]]$optimal_threshold, ch)
-      round(sum(binary_img) / length(binary_img) * 100, 2)
-    })
-  )
-  print(comparison_df)
+  # Between-class-variance plot
+  plot(otsu_result$all_results$threshold, otsu_result$all_results$between_variance,
+       type = "l", main = "Between-class-variance vs Threshold",
+       xlab = "Threshold Value", ylab = "Between-class-variance", 
+       col = "darkblue", lwd = 2)
+  points(otsu_result$threshold_int, otsu_result$max_variance, 
+         col = "red", pch = 16, cex = 2)
+  legend("topleft", legend = "Optimal threshold", col = "red", pch = 16, cex = 1.2)
   
   return(list(
-    image = img,
-    results = results,
-    comparison = comparison_df
+    image = img_gray,
+    threshold = otsu_result$optimal_threshold,
+    binary = binary_img,
+    results = otsu_result
   ))
 }
 
 # Apply to the satellite image URL
-satellite_url <- "https://wp-cdn.apollomapping.com/web_assets/user_uploads/2021/10/19084817/DoleMazeGarden_11_28_2018_WV4_30cmcolor_ENHANCE.jpg"
+satellite_url <- "https://www.beneaththewaves.net/Photography/Images/01-Greyscale-Basic-02-OnEarth_Example-GS-SRTM.JPG"
 
 # Run the analysis
 final_results <- analyze_satellite_image(satellite_url)
 
-# Additional analysis for image segmentation
-cat("\n=== IMAGE SEGMENTATION ANALYSIS ===\n")
-
-# Use the best channel (usually grayscale for overall segmentation)
-best_channel <- "grayscale"
-best_threshold <- final_results$results[[best_channel]]$optimal_threshold
-binary_segmentation <- apply_image_threshold(final_results$image, best_threshold, best_channel)
-
-# Calculate region properties
-cat("Segmentation using", best_channel, "channel:\n")
-cat("Optimal threshold:", round(best_threshold, 3), "\n")
-
-# Connected components analysis (simple version)
-find_connected_components <- function(binary_image) {
-  labeled <- matrix(0, nrow = nrow(binary_image), ncol = ncol(binary_image))
-  current_label <- 1
-  
-  for (i in 1:nrow(binary_image)) {
-    for (j in 1:ncol(binary_image)) {
-      if (binary_image[i, j] == 1 && labeled[i, j] == 0) {
-        # Simple region growing (for demonstration)
-        stack <- list(c(i, j))
-        region_size <- 0
-        
-        while (length(stack) > 0) {
-          pixel <- stack[[1]]
-          stack <- stack[-1]
-          row <- pixel[1]
-          col <- pixel[2]
-          
-          if (row >= 1 && row <= nrow(binary_image) && 
-              col >= 1 && col <= ncol(binary_image) &&
-              binary_image[row, col] == 1 && labeled[row, col] == 0) {
-            
-            labeled[row, col] <- current_label
-            region_size <- region_size + 1
-            
-            # Add neighbors to stack
-            neighbors <- list(
-              c(row-1, col), c(row+1, col),
-              c(row, col-1), c(row, col+1)
-            )
-            stack <- c(stack, neighbors)
-          }
-        }
-        
-        cat("Region", current_label, "size:", region_size, "pixels\n")
-        current_label <- current_label + 1
-      }
-    }
-  }
-  
-  return(labeled)
-}
-
-# Simple connected components (comment out for large images as it can be slow)
-# cat("\nConnected components analysis:\n")
-# components <- find_connected_components(binary_segmentation)
-# cat("Total regions found:", max(components), "\n")
-
-# Show final visualization
-par(mfrow = c(1, 2), mar = c(2, 2, 2, 1))
-plot(as.raster(final_results$image), main = "Original Satellite Image")
-plot(as.raster(binary_segmentation), main = "Otsu Segmentation Result")
-
-cat("\n=== ANALYSIS COMPLETE ===\n")
-cat("Otsu's method has successfully segmented the satellite image\n")
+cat("\n========================================\n")
+cat("=== ANALYSIS COMPLETE ===\n")
+cat("========================================\n")
+cat("Otsu's method has successfully segmented the grayscale satellite image\n")
 cat("The optimal threshold separates foreground objects from background\n")
-cat("This can be used for feature extraction, land cover classification, etc.\n")
